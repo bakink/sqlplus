@@ -35,9 +35,9 @@ col DOP for a3
 col DOP_REASON for a30
 col min_sample_time for a25
 col max_sample_time for a25
-col "DURATIONs" for a25
-col "V$SQL.Adapt" for a11
-col "XML.Adapt"   for a9
+col "DURATIONs"     for a25
+col "V$SQL.Adapt"   for a11
+col "XML.Adapt"     for a9
 col CF            for a3
 
 select s.inst_id    as INST,
@@ -126,30 +126,42 @@ order by
       s.last_load_time,
       s.inst_id
 /
-@@v$sqlstats2 &&1 &&2
+@@"v$sqlstats2" &&1 &&2
 pro
 pro --------------------------------------------------------------
 pro ASH TOP5 SQL_ID=&&1 Executions by Elapsed Time
 pro --------------------------------------------------------------
-select *
-  from (select inst_id,
-               sql_id,
-               sql_plan_hash_value,
---               sql_full_plan_hash_value,
-               sql_exec_id,
-               sql_child_number                    as CHILD_ID,
-               count(distinct sample_id)           as ash_rows,
-               count(distinct inst_id||','||session_id||','||session_serial#) - 1      as PX,
-               max(sample_time) - min(sample_time) as "DURATIONs",
-               min(sample_time)                    as min_sample_time,
-               max(sample_time)                    as max_sample_time
-          from gv$active_session_history
-         where sql_id = '&&1'
-           and (sql_plan_hash_value = NVL('&&2',sql_plan_hash_value) or '&&2' = '0')
-           and sql_exec_id > 0
-         group by inst_id, sql_id, sql_child_number, sql_exec_id, sql_plan_hash_value
---, sql_full_plan_hash_value
-         order by count(distinct sample_id) desc)
- where rownum <= 5
+select * from (select inst_id,
+                      sql_id,
+                      sql_plan_hash_value,
+                      sql_full_plan_hash_value,
+                      sql_exec_id,
+               --       sql_child_number                    as CHILD_ID,
+                      count(distinct sample_time)         as ash_rows,
+                      max(PX)                             as PX,
+                      max(sample_time) - min(sample_time) as "DURATIONs",
+                      min(sample_time)                    as min_sample_time,
+                      max(sample_time)                    as max_sample_time,
+                      max(temp_space_allocated)           as temp_space_allocated
+                 from (select inst_id,
+                              sample_time,
+                              sql_id,
+                              sql_plan_hash_value,
+                              sql_full_plan_hash_value,
+                              sql_exec_id,
+                              count(distinct inst_id||','||session_id||','||session_serial#) as PX,
+                              sum(temp_space_allocated)           as temp_space_allocated
+               , REGEXP_SUBSTR(client_id, '.+\#') as CLIENT_ID
+                         from gv$active_session_history
+                        where sql_id = '&&1'
+                          and (sql_plan_hash_value = NVL('&&2',sql_plan_hash_value) or '&&2' = '0')
+               --           and sql_exec_id > 0
+                        group by inst_id, sample_time, sql_id--, sql_child_number
+                               , sql_exec_id, sql_plan_hash_value
+               , sql_full_plan_hash_value
+               , REGEXP_SUBSTR(client_id, '.+\#'))
+               group by inst_id, sql_id, sql_plan_hash_value, sql_full_plan_hash_value, sql_exec_id
+               order by count(distinct sample_time) desc)
+where rownum <= 25
 /
 set feedback on VERIFY ON
