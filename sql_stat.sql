@@ -18,11 +18,12 @@ select
     round(st.application_wait_time/st.executions) as appwaits_per_exec,
     round(st.concurrency_wait_time/st.executions) as ccwaits_per_exec,
     round(st.cluster_wait_time/st.executions) as clwaits_per_exec,
---    round(st.disk_reads/st.executions) as disk_reads_per_exec,
+    round(st.buffer_gets/st.executions) as buffer_gets_per_exec,
 --    round(st.direct_writes/st.executions) as direct_writes_per_exec,
     round(st.rows_processed/st.executions) as rows_per_exec,
     round(st.fetches/st.executions) as fetch_per_exec,
-    round(st.px_servers_executions/st.executions) as px_per_exec
+    round(st.px_servers_executions/st.executions) as px_per_exec,
+    st.*
 from gv$sql st
 where sql_id = '&1'
 /
