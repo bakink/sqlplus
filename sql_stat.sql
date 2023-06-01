@@ -23,6 +23,11 @@ select
     round(st.rows_processed/st.executions) as rows_per_exec,
     round(st.fetches/st.executions) as fetch_per_exec,
     round(st.px_servers_executions/st.executions) as px_per_exec,
+    decode(st.IO_CELL_OFFLOAD_ELIGIBLE_BYTES,0,'No','Yes') Offloaded, 
+    decode(st.IO_CELL_OFFLOAD_ELIGIBLE_BYTES,0,0, 
+    100*(st.IO_CELL_OFFLOAD_ELIGIBLE_BYTES- 
+    st.IO_INTERCONNECT_BYTES)/ 
+    st.IO_CELL_OFFLOAD_ELIGIBLE_BYTES) "IO_SAVED_%", 
     st.*
 from gv$sql st
 where sql_id = '&1'
