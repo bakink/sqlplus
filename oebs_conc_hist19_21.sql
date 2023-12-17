@@ -1,7 +1,7 @@
 --
 -- EBS concurrent analysis from DBA_HIST_ASH
--- Usage: SQL> @oebs_conc_hist19_21 "91911537,3332222111"    [SQL]|TOP|REQ|SID|MOD|"PL/"|INST [10]
---                                 ^Request_id               ^FieldSelector                   ^topN_sql
+-- Usage: SQL> @oebs_conc_hist19_21 "91911537,3332222111"    [SQL]|TOP|REQ|SID|MOD|"PL/"|INST|OBJ [10]
+--                                 ^Request_id               ^FieldSelector                       ^topN_sql ^order by Duration desc, otherwise - by Activity desc
 --
 
 set echo off feedback off heading on timi off pages 1000 lines 2000 VERIFY OFF
@@ -15,11 +15,11 @@ col WAITS for 999999
 col AVG_WAIT_TIME_MS for 999999
 col SQL_ID for a13
 col SQL_OPNAME for a20
-col PLSQL for a60
+col PLSQL for a70
 col CLIENT_ID for a30
 col SQL_TEXT for a200
 col TOP_SQL_TEXT for a200
-col argument_text for a200
+col argument_text for a250
 col WAIT_PROFILE for a200
 col PARENT_REQUEST_ID for 99999999999
 col PARENT_ID         for 99999999999
@@ -27,6 +27,9 @@ col SID for 999999
 col SERIAL for 99999999
 col actual_start_date for a20
 col actual_completion_date for a20
+col MIN_SAMPLE_TIME        for a26
+col MAX_SAMPLE_TIME        for a26
+col "ROOT_id(program_id)"  for a30
 
 DEFINE v_DBID        = 0
 DEFINE v_min_snap_id = 0
@@ -39,7 +42,14 @@ col max_snap_id   new_value v_max_snap_id  noprint
 col child_reqs    new_value v_child_reqs   noprint
 col sum_ash_rows  new_value v_sum_ash_rows noprint
 
-select parent_request_id, request_id,
+select
+(select request_id||'('||concurrent_program_id||')'
+ from apps.fnd_concurrent_requests
+ where CONNECT_BY_ISLEAF = 1
+  start with request_id = q.request_id
+ connect by nocycle prior parent_request_id = request_id and RESUBMIT_INTERVAL is null) as "ROOT_id(program_id)",
+       parent_request_id,
+       request_id,
        concurrent_program_id,
        actual_start_date,
        actual_completion_date,
@@ -47,6 +57,15 @@ select parent_request_id, request_id,
        PHASE_CODE
       ,(select distinct CONCURRENT_PROGRAM_NAME||'|'||USER_CONCURRENT_PROGRAM_NAME from apps.fnd_concurrent_programs_vl
          where concurrent_program_id = q.concurrent_program_id and rownum <= 1) as CONCURRENT_PROGRAM_NAME
+, (select b.user_concurrent_queue_name
+    from apps.fnd_concurrent_processes a,
+         apps.fnd_concurrent_queues_vl b,
+         apps.fnd_concurrent_requests  c
+   where a.concurrent_queue_id = b.concurrent_queue_id
+     and a.concurrent_process_id = c.controlling_manager
+     and c.request_id = q.request_id) as cm_name
+, RESPONSIBILITY_APPLICATION_ID
+, RESPONSIBILITY_ID
 , argument_text
   from apps.fnd_concurrent_requests q
  where request_id in (&1)
@@ -67,11 +86,13 @@ with sids as
        from system.fnd_concurrent_sessions join apps.fnd_concurrent_requests b using (request_id,parent_request_id)
        start with request_id in  (&1)
         connect by nocycle parent_request_id = prior request_id and b.RESUBMIT_INTERVAL is null
+and b.RESUBMIT_END_DATE is null-- 149210904 ???
         and module not like 'oratop@%')
 , minmax_timestamp as (select min(min_timestamp) as mmin_timestamp
                             , max(max_timestamp) as mmax_timestamp
                             , count(distinct request_id) as child_reqs
-                            , round( sum(cast(max_timestamp as date)-cast(min_timestamp as date)) * 86400 / 10) as sum_ash_rows
+--                            , round( sum(cast(max_timestamp as date)-cast(min_timestamp as date)) * 86400 / 10) as sum_ash_rows
+                            , round( abs(cast(max(max_timestamp) as date)-cast(min(min_timestamp) as date)) * 86400 / 10) as sum_ash_rows
                        from sids)
 --select * from minmax_timestamp
 select-- monitor
@@ -124,6 +145,7 @@ with sids as
        serial#,
        min(v_timestamp) over () as min_timestamp
        , case when STATUS_CODE='R' then sysdate
+              when STATUS_CODE='W' then sysdate
               when STATUS_CODE in ('C','X','E','G') then nvl(actual_completion_date, sysdate)
               else max(v_timestamp) over () end as max_timestamp
        from system.fnd_concurrent_sessions join apps.fnd_concurrent_requests b using (request_id,parent_request_id)
@@ -168,6 +190,7 @@ and module = 'REQID='||'&1')
       , decode(instr(upper('&2'), 'TOP'), 0, 'na', top_level_sql_id)     as top_level_sql_id
       , decode(instr(upper('&2'), 'SQL'), 0, 'na', a.sql_id)               as sql_id
       , decode(instr(upper('&2'), 'SQL'), 0, 'na', sql_plan_hash_value)  as sql_plan_hash_value
+      , decode(instr(upper('&2'), 'SQL'), 0, 'na', sql_opname)           as sql_opname
       , decode(instr(upper('&2'), 'SQL'), 0, 'na', replace(replace(dbms_lob.substr(t.SQL_TEXT,200),chr(10),' '),chr(13),' '))  as SQL_TEXT
       , decode(instr(upper('&2'), 'TOP'), 0, 'na', replace(replace(dbms_lob.substr(t2.SQL_TEXT,200),chr(10),' '),chr(13),' ')) as TOP_SQL_TEXT
       , decode(instr(upper('&2'), 'PL/'), 0, 'na', dp.owner||'.'||dp.object_name||'.'||dp.PROCEDURE_NAME)  as PLSQL
@@ -176,6 +199,7 @@ and module = 'REQID='||'&1')
       , decode(instr(upper('&2'), 'MOD'), 0, 'na', action)     as action
       , decode(instr(upper('&2'), 'MOD'), 0, 'na', client_id)  as client_id
       --, xid
+, decode(instr(upper('&2'), 'OBJ'), 0, 'na', a.current_obj#||':'||o.owner||'.'||o.object_name||'.'||o.subobject_name) as DATA_OBJECT
       , decode(session_state,'WAITING',event,session_state) as EVENT
       , count(distinct a.instance_number||a.sample_id) as ash_row
       , sum(count(distinct a.instance_number||a.sample_id)) over (partition by decode(instr(upper('&2'), 'REQ'), 0, 'na', s.parent_request_id)
@@ -186,12 +210,14 @@ and module = 'REQID='||'&1')
                                                                              , decode(instr(upper('&2'), 'TOP'), 0, 'na', top_level_sql_id)
                                                                              , decode(instr(upper('&2'), 'SQL'), 0, 'na', a.sql_id)
                                                                              , decode(instr(upper('&2'), 'SQL'), 0, 'na', sql_plan_hash_value)
+                                                                             , decode(instr(upper('&2'), 'SQL'), 0, 'na', sql_opname)
                                                                              --, decode(instr(upper('&2'), 'SQL'), 0, 'na', replace(replace(dbms_lob.substr(t.SQL_TEXT,200),chr(10),' '),chr(13),' '))  as SQL_TEXT
                                                                              --, decode(instr(upper('&2'), 'SQL'), 0, 'na', replace(replace(dbms_lob.substr(t2.SQL_TEXT,200),chr(10),' '),chr(13),' ')) as TOP_SQL_TEXT
                                                                              --, decode(instr(upper('&2'), 'SQL'), 0, 'na', dp.owner||'.'||dp.object_name||'.'||dp.PROCEDURE_NAME)  as PLSQL
                                                                              , decode(instr(upper('&2'), 'MOD'), 0, 'na', a.module)
                                                                              , decode(instr(upper('&2'), 'MOD'), 0, 'na', action)
                                                                              , decode(instr(upper('&2'), 'MOD'), 0, 'na', client_id)
+                                                                             , decode(instr(upper('&2'), 'OBJ'), 0, 'na', a.current_obj#||':'||o.owner||'.'||o.object_name||'.'||o.subobject_name)
                                                                              , decode(session_state,'WAITING',event,session_state)) as ash_row4event
       , min(sample_time) as min_sample_time
       , max(sample_time) as max_sample_time
@@ -210,6 +236,7 @@ and module = 'REQID='||'&1')
         left join dba_hist_sqltext t2 on t2.sql_id = a.top_level_sql_id
 left join apps.fnd_concurrent_requests b1 on b1.request_id = s.ROOT_request_id
 left join apps.fnd_concurrent_requests b2 on b2.request_id = s.parent_request_id
+left join CDB_objects      o  on a.current_obj# = o.object_id and a.con_id = o.con_id
       where snap_id between &v_min_snap_id and &v_max_snap_id and a.dbid = &v_DBID
 -----and a.sql_id = '8f3mzav4b845t'
       group by
@@ -230,6 +257,7 @@ left join apps.fnd_concurrent_requests b2 on b2.request_id = s.parent_request_id
       , decode(instr(upper('&2'), 'TOP'), 0, 'na', top_level_sql_id)
       , decode(instr(upper('&2'), 'SQL'), 0, 'na', a.sql_id)
       , decode(instr(upper('&2'), 'SQL'), 0, 'na', sql_plan_hash_value)
+      , decode(instr(upper('&2'), 'SQL'), 0, 'na', sql_opname)
       , decode(instr(upper('&2'), 'SQL'), 0, 'na', replace(replace(dbms_lob.substr(t.SQL_TEXT,200),chr(10),' '),chr(13),' '))
       , decode(instr(upper('&2'), 'TOP'), 0, 'na', replace(replace(dbms_lob.substr(t2.SQL_TEXT,200),chr(10),' '),chr(13),' '))
       , decode(instr(upper('&2'), 'PL/'), 0, 'na', dp.owner||'.'||dp.object_name||'.'||dp.PROCEDURE_NAME)
@@ -237,6 +265,7 @@ left join apps.fnd_concurrent_requests b2 on b2.request_id = s.parent_request_id
       , decode(instr(upper('&2'), 'MOD'), 0, 'na', a.module)
       , decode(instr(upper('&2'), 'MOD'), 0, 'na', action)
       , decode(instr(upper('&2'), 'MOD'), 0, 'na', client_id)
+, decode(instr(upper('&2'), 'OBJ'), 0, 'na', a.current_obj#||':'||o.owner||'.'||o.object_name||'.'||o.subobject_name)
       --, xid
       , decode(session_state,'WAITING',event,session_state)
 , a.instance_number, a.session_id, a.session_serial#, s.request_id
@@ -246,13 +275,15 @@ left join apps.fnd_concurrent_requests b2 on b2.request_id = s.parent_request_id
 select /*+ monitor parallel(4)*/-- cardinality(a 1e6) OPTIMIZER_FEATURES_ENABLE('12.1.0.2') use_concat
     ROOT_request_id
   , parent_request_id, request_id
-, root_PROGRAM_ID, parent_PROGRAM_ID, CONCURRENT_PROGRAM_ID
+, root_PROGRAM_ID, parent_PROGRAM_ID, CONCURRENT_PROGRAM_ID as PROGRAM_ID
   , inst, sid, serial
   , top_level_sql_id, a.sql_id, sql_plan_hash_value
+  , sql_opname
   --, sql_exec_id----, PLSQL_ENTRY_OBJECT_ID, PLSQL_ENTRY_SUBPROGRAM_ID--, PLSQL_OBJECT_ID, PLSQL_SUBPROGRAM_ID
   , PLSQL
   , module, action, client_id
   --, xid
+  , DATA_OBJECT
   , count(distinct sql_exec_id)                                                             as execs
   , count(distinct instance_number||' '||session_id||' '||session_serial#)                  as sids
 ----  , sids_sids                                                                                   as sids
@@ -261,8 +292,11 @@ select /*+ monitor parallel(4)*/-- cardinality(a 1e6) OPTIMIZER_FEATURES_ENABLE(
   , sum(ash_row)                                                                            as ash_rows
   , round(sum(ash_row)/decode(count(distinct sql_exec_id),0,1,count(distinct sql_exec_id))) as per_execs
   , max(max_sample_time)-min(min_sample_time)                                               as rough_duration
+  , round(((max(max_sample_time)+0)-(min(min_sample_time)+0))*86400)                        as rough_dur_secs
   , min(min_sample_time)                                                                    as min_sample_time
   , max(max_sample_time)                                                                    as max_sample_time
+--, min(min_sample_time) over()                                                                   as min_sample_time_
+--, max(max_sample_time) over()                                                                   as max_sample_time_
   , to_char(RATIO_TO_REPORT(sum(ash_row)) OVER() * 100, '990.99')                           AS "DBTime%"
   , substr(LISTAGG (distinct EVENT || '('||ash_row4event||')', '; ' ON OVERFLOW TRUNCATE '...') WITHIN GROUP (ORDER BY ash_row4event desc),1,200) as WAIT_PROFILE
   --, rtrim(xmlagg(xmlelement(s, EVENT || '(' || ash_row4event, '); ').extract('//text()') order by ash_row4event desc), '; ') as WAIT_PROFILE
@@ -279,16 +313,20 @@ select /*+ monitor parallel(4)*/-- cardinality(a 1e6) OPTIMIZER_FEATURES_ENABLE(
 , root_PROGRAM_ID, parent_PROGRAM_ID, CONCURRENT_PROGRAM_ID
   , inst, sid, serial
   , top_level_sql_id, a.sql_id, sql_plan_hash_value
+  , sql_opname
   --, sql_exec_id----, PLSQL_ENTRY_OBJECT_ID, PLSQL_ENTRY_SUBPROGRAM_ID--, PLSQL_OBJECT_ID, PLSQL_SUBPROGRAM_ID
   , PLSQL
   , a.module, action, client_id
+  , DATA_OBJECT
   --, xid
   , SQL_TEXT
   , TOP_SQL_TEXT
   --, EVENT
 ----  , sids_sids
 ----  , sids_reqs
-  order by sum(ash_row)desc--max(sample_time) desc--
+  order by sum(ash_row) desc--decode(upper('&4'), 'D'
+                            -- , 24      --rough_dur_secs
+                            -- , 21) desc--sum(ash_row)
 ----) where rownum <= nvl('&3', 10)
 fetch first nvl('&3', 10) rows only
 /

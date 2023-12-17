@@ -6,7 +6,9 @@
 
 set echo off feedback off heading on timi off pages 1000 lines 1000 VERIFY OFF
 
-col BLOCKING_TREE for a60
+col BLOCKING_TREE for a30
+col LVL           for a3
+col prior_ISID    for a10
 col TYPE          for a4
 col SQL_TEXT      for a200
 col EVENT         for a60 head "Event name"
@@ -17,7 +19,7 @@ col P3TEXT        for a40
 col BLOCK_SESSTAT for a13
 col LAST_CALL_ET  for 999999999999
 col SECS_IN_WAIT  for 999999999999
-col MACHINE       for a36
+col MACHINE       for a60
 col CLNT_PID      for a16
 col OSUSER        for a10
 col SPID          for a10
@@ -47,7 +49,7 @@ select to_char(sysdate,'dd.mm.yyyy hh24:mi:ss') CHAR_DATE from dual
 alter session set "_with_subquery"=optimizer
 */
 with
- LOCKS    as (select /*+ MATERIALIZE*/   * from gv$lock)
+ LOCKS    as (select /*+ MATERIALIZE*/   * from gv$lock where (REQUEST > 0 or block > 0) and type not in ('MR', 'AE', 'TO'))
 --select * from LOCKS
 ,S        as (select /* MATERIALIZE*/ s.* from gv$session s)
 ,BLOCKERS as
@@ -73,6 +75,7 @@ with
                type, inst_id, sid, con_id, KADDR, block, REQUEST, ID1, ID2
 , CONNECT_BY_ROOT sid as ROOT_sid
 , connect_by_isleaf   as isleaf
+, prior SID||'#'||prior INST_ID           as prior_ISID
           from (select inst_id, sid, type, con_id, ID1, ID2, block, REQUEST, KADDR from BLOCKERS
                 union
                 select inst_id, sid, type, con_id, ID1, ID2, block, REQUEST, KADDR from WAITERS) ll
@@ -83,9 +86,13 @@ with
                and prior block > block
          start with (inst_id, sid, type, con_id, ID1, ID2) in
                     (select inst_id, sid, type, con_id, ID1, ID2 from BLOCKERS where block > 0 and REQUEST = 0))
-select --+ ordered opt_param('_optimizer_generate_transitive_pred','FALSE')
-       LVL, BLOCKING_TREE, s.serial#, b3.TYPE--, KADDR
-, ROOT_sid, isleaf   
+select --+ MONITOR ordered opt_param('_optimizer_generate_transitive_pred','FALSE')
+       LVL, BLOCKING_TREE, s.serial#
+, ROOT_sid
+, isleaf   
+, prior_ISID
+, b3.TYPE, ID1, ID2, block, REQUEST
+--, KADDR
      , s.program
      , s.USERNAME
      , s.CLIENT_IDENTIFIER as CLIENT_ID
@@ -101,7 +108,12 @@ select --+ ordered opt_param('_optimizer_generate_transitive_pred','FALSE')
      , s.process as CLNT_PID
      , s.port    as CLNT_PORT
      , NVL(o.object_type, o2.object_type) || ' ' || NVL(o.owner, o2.owner) ||'.'|| NVL(o.object_name, o2.object_name) req_object
-     , decode(sign(nvl(s.ROW_WAIT_OBJ#, -1)), -1, 'NONE', DBMS_ROWID.ROWID_CREATE(1, s.ROW_WAIT_OBJ#, s.ROW_WAIT_FILE#, s.ROW_WAIT_BLOCK#, s.ROW_WAIT_ROW#)) as req_rowid
+--     , decode(sign(nvl(s.ROW_WAIT_OBJ#, -1)), -1, 'NONE', DBMS_ROWID.ROWID_CREATE(1, s.ROW_WAIT_OBJ#, s.ROW_WAIT_FILE#, s.ROW_WAIT_BLOCK#, s.ROW_WAIT_ROW#)) as req_rowid
+--     , decode(b3.TYPE,'TX',decode(sign(nvl(s.ROW_WAIT_OBJ#, -1)), -1, 'NONE',0,'Undo?', DBMS_ROWID.ROWID_CREATE(1, decode(b3.type,'TX',o2.data_object_id,s.ROW_WAIT_OBJ#), d.rfile#, s.ROW_WAIT_BLOCK#, s.ROW_WAIT_ROW#)),'') as req_rowid
+---     , case when b3.TYPE='TX' and s.ROW_WAIT_FILE# > 0 and s.ROW_WAIT_BLOCK# > 0
+---            then decode(sign(nvl(s.ROW_WAIT_OBJ#, -1)), -1, 'NONE',0,'Undo?', DBMS_ROWID.ROWID_CREATE(1, decode(b3.type,'TX',o2.data_object_id,s.ROW_WAIT_OBJ#), d.rfile#, s.ROW_WAIT_BLOCK#, s.ROW_WAIT_ROW#))
+---            else '' end as req_rowid
+,s.ROW_WAIT_OBJ#, s.ROW_WAIT_FILE#, s.ROW_WAIT_BLOCK#, s.ROW_WAIT_ROW#
      , decode(p1text, 'name|mode', chr(bitand(p1,-16777216)/16777215)||chr(bitand(p1, 16711680)/65535)||' '||bitand(p1, 65535), p1text)                      as p1text
      , p1
      , p1raw
@@ -111,10 +123,12 @@ select --+ ordered opt_param('_optimizer_generate_transitive_pred','FALSE')
      , substr(replace(replace(sa1.SQL_TEXT,chr(10),' '),chr(13),' '),1,200) as SQL_TEXT
  from b3
  join s on s.inst_id = b3.inst_id and s.sid = b3.sid
- left join cdb_objects o  on decode(b3.type,'TM',b3.id1,s.p2) = o.object_id and s.con_id =  o.con_id -- here be dragonz
+ left join cdb_objects o  on decode(b3.type,'TM',b3.id1,'') = o.object_id and s.con_id =  o.con_id -- here be dragonz
  left join cdb_objects o2 on s.row_wait_obj#                  = o2.object_id and s.con_id =  o2.con_id
  left join gv$sqlarea sa1 on NVL(s.sql_id,s.prev_sql_id) = sa1.sql_id and s.inst_id =  sa1.inst_id and s.con_id =  sa1.con_id
-order by ID1, ID2, block desc
+left join v$datafile d on d.file# = s.ROW_WAIT_FILE#
+--order by ID1, ID2, block desc
+order by ROOT_sid, LVL
 /
 /*
 with
