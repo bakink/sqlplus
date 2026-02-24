@@ -7,6 +7,7 @@
 
 set feedback on 1 heading on timi off pages 200 lines 500 echo off  VERIFY OFF
 
+col PARSING_SCHEMA_NAME for a20
 col INST for 9999
 col EXECS for 999999999999
 col CHILD for 99999
@@ -40,6 +41,9 @@ col "DURATIONs"     for a25
 col "V$SQL.Adapt"   for a11
 col "XML.Adapt"     for a9
 col CF            for a3
+col ELA_PER_EXEC  for a30
+col CPU_PER_EXEC  for a30
+col CONC_PER_EXEC for a30
 
 select s.inst_id    as INST,
        s.EXECUTIONS as EXECS,
@@ -89,6 +93,7 @@ select s.inst_id    as INST,
        OUTLINE_CATEGORY,
        SQL_PROFILE,
        IS_OBSOLETE
+, module, action, PROGRAM_ID, PROGRAM_LINE#, s.con_id
   from gv$sql s
 LEFT  join (select inst_id, child_address, sql_id, dbms_lob.substr(reason,3990) as REASON from gv$sql_shared_cursor) sc0
        on s.inst_id = sc0.inst_id and s.sql_id = sc0.sql_id and s.child_address = sc0.child_address
@@ -142,13 +147,15 @@ sid, serial#,
                       sql_child_number as child,
 case when sysdate - cast(max(sample_time) as date) <= 1/86400 then '*' else ' ' end as C,
                --       sql_child_number                    as CHILD_ID,
-                      count(distinct sample_time)         as ash_rows,
+                      count(distinct sample_time)         as samples,
+                      sum(ash_rows)                       as ash_rows,
                       max(PX)                             as PX,
                       sql_exec_start,
                       max(sample_time) - min(sample_time) as "DURATIONs",
                       min(sample_time)                    as min_sample_time,
                       max(sample_time)                    as max_sample_time,
-                      max(temp_space_allocated)           as temp_space_allocated
+                      max(temp_space_allocated)           as max_temp_allocated,
+                      max(pga_allocated)                  as max_pga_allocated
                  from (select inst_id,
 nvl(qc_session_id, session_id) as sid,
 nvl(qc_session_serial#, session_serial#) as serial#,
@@ -160,7 +167,9 @@ nvl(qc_session_serial#, session_serial#) as serial#,
                               sql_child_number,
                               sql_exec_start,
                               count(distinct inst_id||','||session_id||','||session_serial#) as PX,
-                              sum(temp_space_allocated)           as temp_space_allocated
+                              sum(temp_space_allocated)                                      as temp_space_allocated,
+                              sum(pga_allocated)                                             as pga_allocated
+                             ,count(*)                                                       as ash_rows
                , REGEXP_SUBSTR(client_id, '.+\#') as CLIENT_ID
                          from gv$active_session_history
                         where sql_id = '&&1'

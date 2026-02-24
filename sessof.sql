@@ -76,7 +76,7 @@ select EVENT as name,
                    select &&1 from dual)
    and wait_class <> 'Idle'
  group by EVENT, wait_class
-having (sum(sev.TOTAL_WAITS) - nvl(sum(gev.TIME_WAITED_micro),0)) > 0
+--having (sum(sev.TOTAL_WAITS) - nvl(sum(gev.TIME_WAITED_micro),0)) > 0--not return!!!
 --   and (sum(sev.TOTAL_WAITS)       - nvl(sum(gev.TOTAL_WAITS),0)) > 0
  order by (sum(sev.TIME_WAITED_micro) - nvl(sum(gev.TIME_WAITED_micro),0)) desc
 /

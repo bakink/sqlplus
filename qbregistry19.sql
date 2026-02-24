@@ -6,7 +6,7 @@ rem
 rem     Last tested 
 rem             19.10.0.0
 rem
-rem Modified for usability and 19c compatibility by Igor Usoltsev
+rem Modified for usability and 19c compatibility
 rem @qbregistry19 0urb01mp7w5dq 1234567890 SEL$D59007A2
 rem               ^sql_id       ^phv       ^output filter
  
@@ -108,14 +108,14 @@ xml as (
         select  other_xml
         from    gV$sql_plan 
         where   sql_id = '&1' and plan_hash_value = &2
-        and     id = 1
+--        and     id = 1
         and     other_xml is not null
 and rownum <= 1
 union all
         select  other_xml
         from    dba_hist_sql_plan
         where   sql_id = '&1' and plan_hash_value = &2
-        and     id = 1
+--        and     id = 1
         and     other_xml is not null
 and rownum <= 1
 and not exists (select 1 from gV$sql_plan where sql_id = '&1' and plan_hash_value = &2)
@@ -144,9 +144,10 @@ inpqbs as (
         where     xml.depqbs in ( select qbname from allqbs) 
         group by xml.qbname
 ), 
-recqb   (src, origin, dest, final, lvl, inpobjs) as ( 
+recqb   (src, origin, dest, final, lvl, inpobjs, ord) as ( 
         select 
                 qbname src, origin origin, null dest, final final, 1 lvl, null inpobjs 
+, TO_NUMBER(REGEXP_SUBSTR(qbname, '[^SEL\$]+') DEFAULT 1e9 ON CONVERSION ERROR) ord
         from 
                 allqbs
         where 
@@ -155,14 +156,16 @@ recqb   (src, origin, dest, final, lvl, inpobjs) as (
         select 
                 a.qbname src, a.origin origin, a.prev dest, a.final final, lvl+1, 
                 (select depqbs from inpqbs i where i.qbname = a.qbname) inpobjs 
+, TO_NUMBER(REGEXP_SUBSTR(a.qbname, '[^SEL\$]+') DEFAULT 1e9 ON CONVERSION ERROR) ord
         from
                 allqbs a, 
                 recqb r 
         where a.prev = r.src
 )
-search depth first by src asc set ordseq, 
+search depth first by ord--src
+ asc set ordseq, 
 finalans as ( 
-        select 
+        select  ordseq,
                 src,
                 (
                 select 
@@ -176,9 +179,9 @@ finalans as (
 ) 
 select
         /*+ opt_param('parallel_execution_enabled', 'false') */ 
-        g.qbreg 
+        ordseq, g.qbreg 
 from (
-        select 
+        select  ordseq,
                 rpad(' ', 2*(lvl-1)) || 
                 src || ' (' || origin || 
                         case when length(dest)>0 
@@ -198,5 +201,5 @@ from (
         from 
                 finalans
         ) g
---where qbreg like '%'||'&3'||'%'
+where qbreg like '%'||'&3'||'%'
 /
